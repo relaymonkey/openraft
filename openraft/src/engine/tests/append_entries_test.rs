@@ -347,3 +347,120 @@ fn test_append_entries_conflict() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// The `when` condition of the single `Respond` command the engine queued.
+fn respond_condition(eng: &mut Engine<UTConfig>) -> Option<Condition<UTConfig>> {
+    let mut found = None;
+    for cmd in eng.output.take_commands() {
+        if let Command::Respond { when, .. } = cmd {
+            assert!(found.is_none(), "one Respond per append");
+            found = Some(when);
+        }
+    }
+    found.expect("a Respond command")
+}
+
+fn leader_vote() -> crate::type_config::alias::VoteOf<UTConfig> {
+    Vote::new_committed(2, 1)
+}
+
+fn flushed(last: Option<crate::type_config::alias::LogIdOf<UTConfig>>) -> Option<Condition<UTConfig>> {
+    Some(Condition::IOFlushed {
+        io_id: IOId::new_log_io(leader_vote().to_committed(), last),
+    })
+}
+
+#[test]
+fn test_handle_append_entries_empty_waits_for_prev_log_id_not_for_accepted_entries() -> anyhow::Result<()> {
+    // An append without entries is answered once the leader's vote and its `prev_log_id` are flushed,
+    // although a bulk append accepted just before it is still in flight.
+    let mut eng = eng();
+    eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), leader_vote());
+    eng.output.take_commands();
+
+    // The bulk append: accepted, answered only after its own entries flush.
+    let (tx, _rx) = UTConfig::<()>::oneshot();
+    eng.handle_append_entries(
+        &leader_vote(),
+        LogSegment::new(Some(log_id(2, 1, 3)), vec![
+            blank_ent::<UTConfig>(2, 1, 4),
+            blank_ent::<UTConfig>(2, 1, 5),
+        ]),
+        tx,
+    );
+    assert_eq!(flushed(Some(log_id(2, 1, 5))), respond_condition(&mut eng));
+
+    // The heartbeat: `prev_log_id` 3 is not the accepted 5.
+    let (tx, _rx) = UTConfig::<()>::oneshot();
+    eng.handle_append_entries(&leader_vote(), LogSegment::new(Some(log_id(2, 1, 3)), vec![]), tx);
+    assert_eq!(
+        flushed(Some(log_id(2, 1, 3))),
+        respond_condition(&mut eng),
+        "an empty append does not wait for the accepted entries"
+    );
+
+    // An empty append at the accepted tail waits for the tail.
+    let (tx, _rx) = UTConfig::<()>::oneshot();
+    eng.handle_append_entries(&leader_vote(), LogSegment::new(Some(log_id(2, 1, 5)), vec![]), tx);
+    assert_eq!(flushed(Some(log_id(2, 1, 5))), respond_condition(&mut eng));
+
+    // An empty append at the very start of the log waits for the vote alone.
+    let (tx, _rx) = UTConfig::<()>::oneshot();
+    eng.handle_append_entries(&leader_vote(), LogSegment::new(None, vec![]), tx);
+    assert_eq!(flushed(None), respond_condition(&mut eng));
+
+    Ok(())
+}
+
+#[test]
+fn test_handle_append_entries_empty_that_raises_the_vote_waits_for_the_vote() -> anyhow::Result<()> {
+    // The node holds only an uncommitted vote; the empty append carries the leader's committed vote.
+    // The condition's vote is the leader's, so it is met only after that vote's save has flushed.
+    let mut eng = eng();
+    eng.output.take_commands();
+
+    let (tx, _rx) = UTConfig::<()>::oneshot();
+    eng.handle_append_entries(&leader_vote(), LogSegment::new(Some(log_id(1, 1, 2)), vec![]), tx);
+
+    let cmds = eng.output.take_commands();
+    assert!(
+        cmds.iter().any(|c| matches!(c, Command::SaveVote { .. })),
+        "the vote is saved"
+    );
+    let when = cmds.into_iter().find_map(|c| match c {
+        Command::Respond { when, .. } => Some(when),
+        _ => None,
+    });
+    assert_eq!(Some(flushed(Some(log_id(1, 1, 2)))), when);
+
+    Ok(())
+}
+
+#[test]
+fn test_handle_append_entries_with_entries_waits_for_the_accepted_io() -> anyhow::Result<()> {
+    let mut eng = eng();
+    eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), leader_vote());
+    eng.output.take_commands();
+
+    let (tx, _rx) = UTConfig::<()>::oneshot();
+    eng.handle_append_entries(
+        &leader_vote(),
+        LogSegment::new(Some(log_id(2, 1, 3)), vec![blank_ent::<UTConfig>(2, 1, 4)]),
+        tx,
+    );
+    assert_eq!(flushed(Some(log_id(2, 1, 4))), respond_condition(&mut eng));
+
+    Ok(())
+}
+
+#[test]
+fn test_handle_append_entries_rejected_has_no_condition() -> anyhow::Result<()> {
+    let mut eng = eng();
+    eng.output.take_commands();
+
+    let (tx, _rx) = UTConfig::<()>::oneshot();
+    eng.handle_append_entries(&Vote::new(1, 1), LogSegment::new(None, vec![]), tx);
+    assert_eq!(None, respond_condition(&mut eng));
+
+    Ok(())
+}

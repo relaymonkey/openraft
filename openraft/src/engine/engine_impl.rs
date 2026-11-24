@@ -640,12 +640,19 @@ where
             self.state.last_log_id().display()
         );
 
+        let prev_log_id = segment.prev_log_id.clone();
+        let no_entries = segment.entries.is_empty();
         let stream_result: StreamAppendResult<C> = self.append_entries(vote, segment).map_err(Into::into);
 
         let condition = if stream_result.is_ok() {
-            Some(Condition::IOFlushed {
-                io_id: self.state.accepted_log_io().unwrap().clone(),
-            })
+            let accepted = self.state.accepted_log_io().unwrap().clone();
+            // An append without entries asserts only that this node holds the leader's vote and
+            // `prev_log_id`. Answer once those are flushed, not after every append accepted before it.
+            let io_id = match (no_entries, accepted.to_committed_vote()) {
+                (true, Some(committed_vote)) => IOId::new_log_io(committed_vote, prev_log_id),
+                _ => accepted,
+            };
+            Some(Condition::IOFlushed { io_id })
         } else {
             None
         };
