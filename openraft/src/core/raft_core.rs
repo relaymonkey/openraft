@@ -1845,7 +1845,7 @@ where
     /// protocol, such as triggering an election or a snapshot.
     fn handle_external_command(&mut self, cmd: ExternalCommand<C>) {
         match cmd {
-            ExternalCommand::Elect { pre_vote } => {
+            ExternalCommand::Elect { pre_vote, at_term } => {
                 if self.engine.leader.is_some() {
                     // A Leader can not win a campaign it starts: its own heartbeats keep
                     // refreshing the voters' leader lease, and a lease that has not expired
@@ -1854,7 +1854,10 @@ where
                 } else {
                     if self.engine.state.membership_state.is_voter_in_effective_or_committed(&self.id) {
                         if pre_vote {
-                            self.engine.pre_elect();
+                            match at_term {
+                                Some(term) => self.engine.pre_elect_at(term),
+                                None => self.engine.pre_elect(),
+                            }
                         } else {
                             self.engine.elect();
                         }

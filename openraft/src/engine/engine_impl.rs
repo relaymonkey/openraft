@@ -304,6 +304,31 @@ where
         self.server_state_handler().update_server_state_if_changed();
     }
 
+    /// Start a Pre-Vote round only if this node still is where the caller saw it.
+    ///
+    /// A no-op unless the vote's term equals `term` and no election is in flight on this node
+    /// (it is not a Candidate); otherwise it is [`pre_elect`](Self::pre_elect).
+    ///
+    /// The caller pins the term it observed when it queued the trigger. Queued triggers run on the
+    /// core one after another: once the first round has turned into an election, the vote's term
+    /// is `term + 1` and the node is a Candidate, so the later trigger is suppressed instead of
+    /// asking for `term + 2`. A suppressed trigger equals one that was never sent.
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub(crate) fn pre_elect_at(&mut self, term: C::Term) {
+        let current = self.state.vote_ref().term();
+        if current != term || self.candidate.is_some() {
+            tracing::info!(
+                "skip pre-elect at term {}: vote term is {}, candidate in flight: {}",
+                term,
+                current,
+                self.candidate.is_some()
+            );
+            return;
+        }
+
+        self.pre_elect();
+    }
+
     /// Start a Pre-Vote round.
     ///
     /// Probe whether a quorum *would* grant a vote at `term + 1` without changing any local state:
