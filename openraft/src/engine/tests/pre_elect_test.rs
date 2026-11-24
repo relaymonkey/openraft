@@ -182,3 +182,95 @@ fn test_pre_elect_removed_committed_voter_uses_effective_quorum() {
         assert_eq!(ServerState::Candidate, eng.state.server_state);
     }
 }
+
+/// A voter 1 in {1,2,3} that follows nobody, at vote term 0.
+fn eng_voter_of_three() -> Engine<UTConfig> {
+    let mut eng = eng();
+    eng.config.id = 1;
+    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+        Some(log_id(0, 1, 1)),
+        Membership::new_with_defaults(vec![btreeset! {1,2,3}], []),
+    )));
+    eng.state.log_ids = LogIdList::new(None, vec![log_id(1, 1, 1)]);
+    eng
+}
+
+#[test]
+fn test_pre_elect_at_runs_at_the_pinned_term() -> anyhow::Result<()> {
+    let mut eng = eng_voter_of_three();
+
+    eng.pre_elect_at(0);
+
+    assert_eq!(Vote::new(1, 1), *eng.pre_candidate_ref().unwrap().vote_ref());
+    assert_eq!(
+        vec![Command::SendPreVote {
+            vote_req: VoteRequest::new(Vote::new(1, 1), Some(log_id(1, 1, 1)))
+        }],
+        eng.output.take_commands()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_pre_elect_at_is_a_noop_when_the_term_moved() -> anyhow::Result<()> {
+    let mut eng = eng_voter_of_three();
+    eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::ZERO, Vote::new(3, 2));
+
+    eng.pre_elect_at(2);
+
+    assert!(eng.pre_candidate_ref().is_none());
+    assert!(eng.candidate_ref().is_none());
+    assert_eq!(Vote::new(3, 2), *eng.state.vote_ref());
+    assert_eq!(0, eng.output.take_commands().len());
+
+    Ok(())
+}
+
+#[test]
+fn test_pre_elect_at_queued_twice_raises_the_term_once() -> anyhow::Result<()> {
+    // Two triggers pinned to term 0 are queued, the second before the first round's replies are
+    // processed. Replies of round one arrive between them on the core: the second trigger then runs
+    // from a Candidate at term 1 and must not ask for term 2.
+    let mut eng = eng_voter_of_three();
+
+    tracing::info!("--- trigger 1 starts the pre-vote round for term 1");
+    eng.pre_elect_at(0);
+    eng.output.take_commands();
+
+    tracing::info!("--- the round is granted: the real election for term 1 starts");
+    eng.handle_pre_vote_resp(2, VoteResponse::new(Vote::new(0, 0), Some(log_id(1, 1, 1)), true));
+    assert_eq!(Vote::new(1, 1), *eng.state.vote_ref());
+    assert!(eng.candidate_ref().is_some());
+    assert_eq!(ServerState::Candidate, eng.state.server_state);
+    eng.output.take_commands();
+
+    tracing::info!("--- trigger 2, still pinned to term 0, is suppressed");
+    eng.pre_elect_at(0);
+    assert!(eng.pre_candidate_ref().is_none());
+    assert_eq!(Vote::new(1, 1), *eng.state.vote_ref());
+    assert_eq!(0, eng.output.take_commands().len());
+
+    tracing::info!("--- a trigger pinned to the candidate's own term is suppressed too");
+    eng.pre_elect_at(1);
+    assert!(eng.pre_candidate_ref().is_none());
+    assert_eq!(0, eng.output.take_commands().len());
+
+    Ok(())
+}
+
+#[test]
+fn test_pre_elect_at_second_trigger_before_the_first_is_granted_restarts_the_round() -> anyhow::Result<()> {
+    // The residual: a trigger processed while round one is in flight passes the pin (term unchanged,
+    // not a Candidate) and restarts the round at the same term. The term is not raised twice.
+    let mut eng = eng_voter_of_three();
+
+    eng.pre_elect_at(0);
+    eng.pre_elect_at(0);
+
+    assert_eq!(Vote::new(1, 1), *eng.pre_candidate_ref().unwrap().vote_ref());
+    assert_eq!(Vote::new(0, 0), *eng.state.vote_ref());
+    assert!(eng.candidate_ref().is_none());
+
+    Ok(())
+}

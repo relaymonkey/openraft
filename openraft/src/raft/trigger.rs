@@ -65,7 +65,38 @@ where C: RaftTypeConfig
     ///
     /// [`Config::enable_pre_vote`]: crate::Config::enable_pre_vote
     pub async fn elect(&self, pre_vote: bool) -> Result<(), Fatal<C>> {
-        self.raft_inner.send_external_command(ExternalCommand::Elect { pre_vote }).await
+        self.raft_inner
+            .send_external_command(ExternalCommand::Elect {
+                pre_vote,
+                at_term: None,
+            })
+            .await
+    }
+
+    /// Trigger a Pre-Vote round pinned to the term it was issued for, and return at once.
+    ///
+    /// Like [`elect(true)`](Self::elect), but the core runs it only if this node's vote term is
+    /// still `term` and the node is not a Candidate; otherwise it is a no-op, the same as a
+    /// trigger that was never sent. The check runs on the core, in its own event order, so it is
+    /// atomic with the election the round would start.
+    ///
+    /// Use it when several triggers may be queued from one observation of the node's term: the
+    /// first one's Pre-Vote can turn into an election (raising the term) before the next one is
+    /// processed, and a plain `elect(true)` from a Candidate would then ask for `term + 2`.
+    ///
+    /// A second trigger processed while the first Pre-Vote round is still in flight passes the
+    /// check (the term is unchanged and the node is not yet a Candidate) and restarts the round at
+    /// the same term; it cannot raise the term twice.
+    ///
+    /// Returns error when RaftCore has [`Fatal`] error, e.g., shut down or having storage error.
+    #[since(version = "0.10.0")]
+    pub async fn pre_vote_at(&self, term: C::Term) -> Result<(), Fatal<C>> {
+        self.raft_inner
+            .send_external_command(ExternalCommand::Elect {
+                pre_vote: true,
+                at_term: Some(term),
+            })
+            .await
     }
 
     /// Trigger a heartbeat at once and return at once.

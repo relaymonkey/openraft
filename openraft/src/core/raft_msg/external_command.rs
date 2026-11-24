@@ -37,7 +37,11 @@ where C: RaftTypeConfig
     /// if a quorum would. A node that cannot currently win — e.g. while a healthy leader still
     /// holds its lease — leaves the term untouched, so an incautious trigger does not disrupt a
     /// live leader.
-    Elect { pre_vote: bool },
+    ///
+    /// With `at_term = Some(term)` (only used with `pre_vote = true`), the command is a no-op
+    /// unless this node's vote term is still `term` and it is not a Candidate. The check runs on
+    /// the core, in its own event order, so it is atomic with the election it would start.
+    Elect { pre_vote: bool, at_term: Option<C::Term> },
 
     /// Send a heartbeat message, only if the node is leader, or it will be ignored.
     Heartbeat,
@@ -125,8 +129,8 @@ where C: RaftTypeConfig
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ExternalCommand::Elect { pre_vote } => {
-                write!(f, "Elect{{pre_vote={pre_vote}}}")
+            ExternalCommand::Elect { pre_vote, at_term } => {
+                write!(f, "Elect{{pre_vote={pre_vote}, at_term={}}}", at_term.display())
             }
             ExternalCommand::Heartbeat => {
                 write!(f, "Heartbeat")
